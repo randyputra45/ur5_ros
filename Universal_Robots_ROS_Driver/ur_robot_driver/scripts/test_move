@@ -34,6 +34,8 @@ from trajectory_msgs.msg import JointTrajectoryPoint
 from controller_manager_msgs.srv import SwitchControllerRequest, SwitchController
 from controller_manager_msgs.srv import LoadControllerRequest, LoadController
 from controller_manager_msgs.srv import ListControllers, ListControllersRequest
+from ur_msgs.srv import SetIO
+
 import geometry_msgs.msg as geometry_msgs
 from cartesian_control_msgs.msg import (
     FollowCartesianTrajectoryAction,
@@ -90,6 +92,8 @@ class TrajectoryClient:
         )
         self.load_srv = rospy.ServiceProxy("controller_manager/load_controller", LoadController)
         self.list_srv = rospy.ServiceProxy("controller_manager/list_controllers", ListControllers)
+        self.gripper_srv = rospy.ServiceProxy("ur_hardware_interface/set_io", SetIO)
+
         try:
             self.switch_srv.wait_for_service(timeout.to_sec())
         except rospy.exceptions.ROSException as err:
@@ -99,9 +103,7 @@ class TrajectoryClient:
         self.joint_trajectory_controller = JOINT_TRAJECTORY_CONTROLLERS[0]
         self.cartesian_trajectory_controller = CARTESIAN_TRAJECTORY_CONTROLLERS[0]
 
-    def send_joint_trajectory(self):
-        """Creates a trajectory and sends it using the selected action server"""
-
+    def move_robot_joint(self, position_list, duration_list):
         # make sure the correct controller is loaded and activated
         self.switch_controller(self.joint_trajectory_controller)
         trajectory_client = actionlib.SimpleActionClient(
@@ -119,26 +121,48 @@ class TrajectoryClient:
         goal = FollowJointTrajectoryGoal()
         goal.trajectory.joint_names = JOINT_NAMES
 
-        # The following list are arbitrary positions
-        # Change to your own needs if desired
-        position_list = [[0, -1.57, -1.57, 0, 0, 0]]
-        position_list.append([0.2, -1.57, -1.57, 0, 0, 0])
-        position_list.append([-0.5, -1.57, -1.2, 0, 0, 0])
-        duration_list = [3.0, 7.0, 10.0]
         for i, position in enumerate(position_list):
             point = JointTrajectoryPoint()
             point.positions = position
             point.time_from_start = rospy.Duration(duration_list[i])
             goal.trajectory.points.append(point)
 
-        self.ask_confirmation(position_list)
-        rospy.loginfo("Executing trajectory using the {}".format(self.joint_trajectory_controller))
-
         trajectory_client.send_goal(goal)
         trajectory_client.wait_for_result()
 
         result = trajectory_client.get_result()
         rospy.loginfo("Trajectory execution finished in state {}".format(result.error_code))
+
+    def open_gripper(self, width):
+        response = self.gripper_srv(fun=3, pin=0, state=width)
+        response = self.gripper_srv(fun=1, pin=7, state=1)
+        rospy.sleep(0.5)
+        response = self.gripper_srv(fun=1, pin=7, state=0)
+        rospy.loginfo("Gripper trajectory finished in state {}".format(response))
+
+    def send_joint_trajectory(self):
+        """Creates a trajectory and sends it using the selected action server"""
+        homepos = [1.7774, -2.2031, 2.1680, 0.0431, 2.2174, -1.5566]
+        prepare_pick = [1.3772, -1.7756, 2.1657, -0.3656, 2.5303, -1.5596]
+        pickbins_1 = [1.1218, -1.5730, 2.1067, -0.5190, 2.3160, -1.5732]
+        pickbins_2 = [1.1246, -1.6275, 2.0198, -0.3736, 2.3218, -1.5676]
+
+        # Stage 1
+        position_list = [homepos, prepare_pick, pickbins_1]
+        duration_list = [5.0, 9.0, 14.0]
+
+        self.open_gripper(0.1)
+        self.ask_confirmation(position_list)
+        self.move_robot_joint(position_list, duration_list)
+        rospy.loginfo("Executing trajectory using the {}".format(self.joint_trajectory_controller))
+        
+        # Stage 2
+        self.open_gripper(0.0)
+        rospy.sleep(2)
+
+        position_list = [pickbins_2, prepare_pick, homepos]
+        duration_list = [3.0, 7.0, 11.0]
+        self.move_robot_joint(position_list, duration_list)
 
     def send_cartesian_trajectory(self):
         """Creates a Cartesian trajectory and sends it using the selected action server"""
